@@ -1,0 +1,1057 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ЛИГАТО — Учёт рабочего времени</title>
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect fill='%232563eb' rx='20' width='100' height='100'/><text x='50%' y='55%' dominant-baseline='middle' text-anchor='middle' fill='white' font-size='50' font-weight='bold'>Л</text></svg>">
+  <style>
+    body { margin: 0; font-family: system-ui, -apple-system, sans-serif; }
+    .loading { display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; gap: 1rem; }
+    .spinner { width: 40px; height: 40px; border: 3px solid #e5e5e5; border-top-color: #2563eb; border-radius: 50%; animation: spin 1s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+  </style>
+</head>
+<body>
+  <div id="root">
+    <div class="loading">
+      <div class="spinner"></div>
+      <div style="color: #737373;">Загрузка...</div>
+    </div>
+  </div>
+  
+  <script type="text/babel">
+    const { useState, useMemo, useEffect, useCallback } = React;
+
+    // ====== НАСТРОЙКИ GOOGLE SHEETS ======
+    // Инструкция по настройке в README.md
+    const CONFIG = {
+      // Вставьте сюда ID вашего Google Apps Script (Web App URL)
+      SCRIPT_URL: '', // Например: 'https://script.google.com/macros/s/AKfycbw_rv1O4drNYxF38V9UhXNASU5a396_qIYGoo1KALwHTZaoE58JmKErMzWGk6-h9RxZtw/exec'
+    };
+
+    // ====== РАБОТА С GOOGLE SHEETS ======
+    const api = {
+      async load() {
+        if (!CONFIG.SCRIPT_URL) return null;
+        try {
+          const res = await fetch(`${CONFIG.SCRIPT_URL}?action=load`);
+          return await res.json();
+        } catch (e) {
+          console.error('Ошибка загрузки:', e);
+          return null;
+        }
+      },
+      
+      async save(data) {
+        if (!CONFIG.SCRIPT_URL) return false;
+        try {
+          await fetch(CONFIG.SCRIPT_URL, {
+            method: 'POST',
+            mode: 'no-cors',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action: 'save', data })
+          });
+          return true;
+        } catch (e) {
+          console.error('Ошибка сохранения:', e);
+          return false;
+        }
+      }
+    };
+
+    // ====== НАЧАЛЬНЫЕ ДАННЫЕ ======
+    const initialData = {
+      employees: [
+        { id: 1, name: 'Иванов А.С.', position: 'Ведущий инженер', isMod: false },
+        { id: 2, name: 'Петрова М.В.', position: 'Инженер', isMod: false },
+        { id: 3, name: 'Сидоров К.Н.', position: 'Ведущий инженер', isMod: false },
+        { id: 4, name: 'Козлова Е.А.', position: 'Инженер', isMod: false },
+        { id: 100, name: 'Смирнов Д.В.', position: 'Руководитель группы', isMod: true },
+      ],
+      projects: [
+        { id: 1, code: '2024-15', name: 'ЖК Речной' },
+        { id: 2, code: '2024-08', name: 'ТЦ Галерея' },
+      ],
+      sections: [
+        { id: 1, projectId: 1, name: 'Фундаменты', employeeId: 1, deadline: '2025-02-07', plannedHours: 32 },
+        { id: 2, projectId: 1, name: 'Перекрытия корп.1', employeeId: 2, deadline: '2025-02-12', plannedHours: 48 },
+        { id: 3, projectId: 1, name: 'Стены подвала', employeeId: 1, deadline: '2025-02-14', plannedHours: 24 },
+        { id: 4, projectId: 2, name: 'Каркас атриума', employeeId: 3, deadline: '2025-02-10', plannedHours: 40 },
+        { id: 5, projectId: 2, name: 'Фасадные конструкции', employeeId: 4, deadline: '2025-02-11', plannedHours: 32 },
+        { id: 6, projectId: 2, name: 'Кровля', employeeId: 3, deadline: '2025-02-08', plannedHours: 24 },
+      ],
+      tasks: [
+        { id: 1, sectionId: 1, date: '2025-02-03', hours: 8, desc: 'Схема фундаментов секции А' },
+        { id: 2, sectionId: 1, date: '2025-02-04', hours: 8, desc: 'Схема фундаментов секции Б' },
+        { id: 3, sectionId: 1, date: '2025-02-05', hours: 6, desc: 'Увязка с АР, замечания ГИП' },
+        { id: 4, sectionId: 4, date: '2025-02-03', hours: 8, desc: 'Схема колонн атриума' },
+        { id: 5, sectionId: 4, date: '2025-02-04', hours: 8, desc: 'Связи, прогоны' },
+        { id: 6, sectionId: 4, date: '2025-02-05', hours: 7, desc: 'Балки покрытия' },
+        { id: 7, sectionId: 2, date: '2025-02-05', hours: 8, desc: 'Армирование Пм1' },
+        { id: 8, sectionId: 2, date: '2025-02-06', hours: 8, desc: 'Армирование Пм2, Пм3' },
+        { id: 9, sectionId: 6, date: '2025-02-04', hours: 4, desc: 'Сбор нагрузок' },
+        { id: 10, sectionId: 5, date: '2025-02-06', hours: 8, desc: 'Узлы У1-У5' },
+        { id: 11, sectionId: 6, date: '2025-02-05', hours: 8, desc: 'Расчёт SCAD' },
+        { id: 12, sectionId: 6, date: '2025-02-06', hours: 6, desc: 'Проверка прогибов' },
+      ]
+    };
+
+    // ====== ГЛАВНЫЙ КОМПОНЕНТ ======
+    const TimeTracker = () => {
+      const [data, setData] = useState(initialData);
+      const [loading, setLoading] = useState(true);
+      const [saving, setSaving] = useState(false);
+      const [lastSync, setLastSync] = useState(null);
+      const [isOnline, setIsOnline] = useState(!!CONFIG.SCRIPT_URL);
+      
+      const { employees, projects, sections, tasks } = data;
+
+      // Загрузка данных при старте
+      useEffect(() => {
+        const loadData = async () => {
+          if (CONFIG.SCRIPT_URL) {
+            const loaded = await api.load();
+            if (loaded && loaded.employees) {
+              setData(loaded);
+              setLastSync(new Date());
+              setIsOnline(true);
+            } else {
+              // Если не удалось загрузить — используем localStorage как fallback
+              const local = localStorage.getItem('ligato_data');
+              if (local) setData(JSON.parse(local));
+              setIsOnline(false);
+            }
+          } else {
+            // Нет настроенного API — работаем локально
+            const local = localStorage.getItem('ligato_data');
+            if (local) setData(JSON.parse(local));
+            setIsOnline(false);
+          }
+          setLoading(false);
+        };
+        loadData();
+      }, []);
+
+      // Сохранение данных
+      const saveData = useCallback(async (newData) => {
+        setData(newData);
+        localStorage.setItem('ligato_data', JSON.stringify(newData));
+        
+        if (CONFIG.SCRIPT_URL) {
+          setSaving(true);
+          const success = await api.save(newData);
+          setSaving(false);
+          if (success) {
+            setLastSync(new Date());
+            setIsOnline(true);
+          } else {
+            setIsOnline(false);
+          }
+        }
+      }, []);
+
+      // Обновление отдельных частей данных
+      const updateData = (key, value) => {
+        const newData = { ...data, [key]: typeof value === 'function' ? value(data[key]) : value };
+        saveData(newData);
+      };
+
+      const setEmployees = (val) => updateData('employees', val);
+      const setProjects = (val) => updateData('projects', val);
+      const setSections = (val) => updateData('sections', val);
+      const setTasks = (val) => updateData('tasks', val);
+
+      // Периодическая синхронизация (каждые 30 сек)
+      useEffect(() => {
+        if (!CONFIG.SCRIPT_URL) return;
+        const interval = setInterval(async () => {
+          const loaded = await api.load();
+          if (loaded && loaded.employees) {
+            setData(loaded);
+            setLastSync(new Date());
+            setIsOnline(true);
+          }
+        }, 30000);
+        return () => clearInterval(interval);
+      }, []);
+
+      const [currentUserId, setCurrentUserId] = useState(100);
+      const [view, setView] = useState('gantt');
+      const [selectedProject, setSelectedProject] = useState(null);
+      const [selectedDate, setSelectedDate] = useState(new Date().toISOString().split('T')[0]);
+      const [expanded, setExpanded] = useState(new Set([1, 4, 6]));
+      const [modal, setModal] = useState(null);
+      const [form, setForm] = useState({});
+
+      const today = new Date().toISOString().split('T')[0];
+      const user = employees.find(e => e.id === currentUserId);
+      const isMod = user?.isMod;
+
+      const getSectionHours = (id) => tasks.filter(t => t.sectionId === id).reduce((s, t) => s + t.hours, 0);
+      const getSectionProgress = (sec) => sec.plannedHours > 0 ? Math.min(Math.round((getSectionHours(sec.id) / sec.plannedHours) * 100), 100) : 0;
+
+      const mySections = useMemo(() => sections.filter(s => s.employeeId === currentUserId), [sections, currentUserId]);
+      const myTodayTasks = useMemo(() => {
+        const ids = mySections.map(s => s.id);
+        return tasks.filter(t => ids.includes(t.sectionId) && t.date === today);
+      }, [tasks, mySections, today]);
+      const myTodayHours = myTodayTasks.reduce((s, t) => s + t.hours, 0);
+
+      const filteredSections = useMemo(() => {
+        return selectedProject ? sections.filter(s => s.projectId === selectedProject) : sections;
+      }, [sections, selectedProject]);
+
+      const dateRange = useMemo(() => {
+        const allDates = [
+          ...filteredSections.map(s => new Date(s.deadline)),
+          ...tasks.filter(t => filteredSections.some(s => s.id === t.sectionId)).map(t => new Date(t.date)),
+          new Date(today)
+        ];
+        if (allDates.length === 0) {
+          const days = [];
+          for (let i = 0; i < 14; i++) days.push(new Date(Date.now() + i * 86400000));
+          return days;
+        }
+        const min = new Date(Math.min(...allDates)); min.setDate(min.getDate() - 2);
+        const max = new Date(Math.max(...allDates)); max.setDate(max.getDate() + 2);
+        const days = [];
+        for (let d = new Date(min); d <= max; d.setDate(d.getDate() + 1)) days.push(new Date(d));
+        return days;
+      }, [filteredSections, tasks, today]);
+
+      const fmt = (d) => new Date(d).toLocaleDateString('ru-RU', { day: 'numeric', month: 'short' });
+      const fmtFull = (d) => new Date(d).toLocaleDateString('ru-RU', { weekday: 'long', day: 'numeric', month: 'long' });
+      const fmtTime = (d) => d ? d.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' }) : '';
+      const isWknd = (d) => [0, 6].includes(new Date(d).getDay());
+      const isToday = (d) => new Date(d).toISOString().split('T')[0] === today;
+
+      const grouped = useMemo(() => {
+        const projIds = [...new Set(filteredSections.map(s => s.projectId))];
+        return projIds.map(pid => ({
+          project: projects.find(p => p.id === pid),
+          sections: filteredSections.filter(s => s.projectId === pid)
+        }));
+      }, [filteredSections, projects]);
+
+      const stats = useMemo(() => ({
+        sections: filteredSections.length,
+        planned: filteredSections.reduce((s, sec) => s + sec.plannedHours, 0),
+        actual: filteredSections.reduce((s, sec) => s + getSectionHours(sec.id), 0),
+        progress: filteredSections.length ? Math.round(filteredSections.reduce((s, sec) => s + getSectionProgress(sec), 0) / filteredSections.length) : 0
+      }), [filteredSections, tasks]);
+
+      // CRUD операции
+      const saveSection = () => {
+        const { projectId, name, employeeId, deadline, plannedHours } = form;
+        if (!projectId || !name || !employeeId || !deadline) return;
+        if (modal === 'editSection') {
+          setSections(sections.map(s => s.id === form.id ? { ...s, projectId: +projectId, name, employeeId: +employeeId, deadline, plannedHours: +plannedHours || 0 } : s));
+        } else {
+          setSections([...sections, { id: Date.now(), projectId: +projectId, name, employeeId: +employeeId, deadline, plannedHours: +plannedHours || 0 }]);
+        }
+        closeModal();
+      };
+
+      const deleteSection = (id) => {
+        if (!confirm('Удалить раздел?')) return;
+        setSections(sections.filter(s => s.id !== id));
+        setTasks(tasks.filter(t => t.sectionId !== id));
+      };
+
+      const saveTask = () => {
+        const { sectionId, date, hours, desc } = form;
+        if (!hours || !desc) return;
+        if (modal === 'editTask') {
+          setTasks(tasks.map(t => t.id === form.id ? { ...t, date: date || today, hours: +hours, desc } : t));
+        } else {
+          setTasks([...tasks, { id: Date.now(), sectionId, date: date || today, hours: +hours, desc }]);
+        }
+        closeModal();
+      };
+
+      const deleteTask = (id) => {
+        if (!confirm('Удалить?')) return;
+        setTasks(tasks.filter(t => t.id !== id));
+      };
+
+      const saveProject = () => {
+        if (!form.code || !form.name) return;
+        setProjects([...projects, { id: Date.now(), code: form.code, name: form.name }]);
+        closeModal();
+      };
+
+      const saveEmployee = () => {
+        if (!form.name || !form.position) return;
+        setEmployees([...employees, { id: Date.now(), name: form.name, position: form.position, isMod: form.isMod || false }]);
+        closeModal();
+      };
+
+      const closeModal = () => { setModal(null); setForm({}); };
+
+      const tasksByDate = useMemo(() => tasks.filter(t => t.date === selectedDate), [tasks, selectedDate]);
+
+      const resetData = () => {
+        if (confirm('Сбросить все данные к начальным значениям?')) {
+          saveData(initialData);
+        }
+      };
+
+      if (loading) {
+        return (
+          <div className="loading">
+            <div className="spinner"></div>
+            <div style={{ color: '#737373' }}>Загрузка данных...</div>
+          </div>
+        );
+      }
+
+      return (
+        <div className="min-h-screen bg-stone-50">
+          {/* Header */}
+          <header className="bg-white border-b border-stone-200 sticky top-0 z-40">
+            <div className="max-w-7xl mx-auto px-4 sm:px-6 h-16 flex items-center justify-between">
+              <div className="flex items-center gap-4">
+                <div className="flex items-center gap-2.5">
+                  <div className="w-9 h-9 rounded-lg bg-gradient-to-br from-blue-600 to-blue-700 flex items-center justify-center shadow-sm">
+                    <span className="text-white font-semibold text-sm">Л</span>
+                  </div>
+                  <div className="hidden sm:block">
+                    <div className="font-semibold text-stone-900 leading-tight">ЛИГАТО</div>
+                    <div className="text-[11px] text-stone-500">Группа КЖ/КМ</div>
+                  </div>
+                </div>
+                
+                {/* Статус синхронизации */}
+                <div className="hidden sm:flex items-center gap-2 text-xs">
+                  {saving ? (
+                    <span className="text-amber-600 flex items-center gap-1">
+                      <span className="w-2 h-2 bg-amber-500 rounded-full animate-pulse"></span>
+                      Сохранение...
+                    </span>
+                  ) : isOnline ? (
+                    <span className="text-emerald-600 flex items-center gap-1">
+                      <span className="w-2 h-2 bg-emerald-500 rounded-full"></span>
+                      Онлайн {lastSync && `· ${fmtTime(lastSync)}`}
+                    </span>
+                  ) : (
+                    <span className="text-stone-400 flex items-center gap-1">
+                      <span className="w-2 h-2 bg-stone-400 rounded-full"></span>
+                      Локально
+                    </span>
+                  )}
+                </div>
+              </div>
+              
+              <div className="flex items-center gap-2 sm:gap-3">
+                <div className="flex items-center gap-2 px-2 sm:px-3 py-1.5 bg-stone-100 rounded-lg">
+                  <div className={`w-2 h-2 rounded-full ${isMod ? 'bg-amber-500' : 'bg-blue-500'}`}></div>
+                  <select
+                    value={currentUserId}
+                    onChange={(e) => setCurrentUserId(+e.target.value)}
+                    className="bg-transparent text-sm font-medium text-stone-700 focus:outline-none cursor-pointer pr-1 max-w-[120px] sm:max-w-none"
+                  >
+                    {employees.map(e => <option key={e.id} value={e.id}>{e.name}</option>)}
+                  </select>
+                </div>
+                
+                {isMod && (
+                  <button 
+                    onClick={() => { setModal('addSection'); setForm({}); }}
+                    className="h-9 px-3 sm:px-4 bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium rounded-lg transition-colors"
+                  >
+                    <span className="hidden sm:inline">+ Назначить раздел</span>
+                    <span className="sm:hidden">+ Раздел</span>
+                  </button>
+                )}
+              </div>
+            </div>
+          </header>
+
+          <main className="max-w-7xl mx-auto px-4 sm:px-6 py-4 sm:py-6">
+            {/* Предупреждение о настройке */}
+            {!CONFIG.SCRIPT_URL && (
+              <div className="mb-6 p-4 bg-amber-50 border border-amber-200 rounded-xl">
+                <div className="flex items-start gap-3">
+                  <span className="text-xl">⚠️</span>
+                  <div>
+                    <p className="font-medium text-amber-800">Работа в локальном режиме</p>
+                    <p className="text-sm text-amber-700 mt-1">
+                      Данные сохраняются только в этом браузере. Для общей работы команды настройте Google Sheets по инструкции в README.
+                    </p>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Navigation */}
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-6">
+              <nav className="flex gap-1 p-1 bg-white rounded-xl border border-stone-200 shadow-sm overflow-x-auto">
+                {[
+                  ...(!isMod ? [{ id: 'my', label: 'Мои разделы' }] : []),
+                  { id: 'gantt', label: 'График' },
+                  { id: 'daily', label: 'По дням' },
+                  { id: 'team', label: 'Команда' },
+                ].map(t => (
+                  <button
+                    key={t.id}
+                    onClick={() => setView(t.id)}
+                    className={`px-3 sm:px-4 py-2 text-sm font-medium rounded-lg transition-all whitespace-nowrap ${
+                      view === t.id 
+                        ? 'bg-stone-900 text-white shadow-sm' 
+                        : 'text-stone-600 hover:text-stone-900 hover:bg-stone-50'
+                    }`}
+                  >
+                    {t.label}
+                  </button>
+                ))}
+              </nav>
+              
+              <div className={`px-3 py-1.5 rounded-full text-xs font-medium self-start ${isMod ? 'bg-amber-100 text-amber-700' : 'bg-blue-100 text-blue-700'}`}>
+                {isMod ? 'Руководитель' : 'Исполнитель'}
+              </div>
+            </div>
+
+            {/* MY SECTIONS */}
+            {view === 'my' && !isMod && (
+              <div className="space-y-6">
+                <div className="bg-white rounded-2xl border border-stone-200 shadow-sm overflow-hidden">
+                  <div className="p-4 sm:p-6">
+                    <div className="flex items-start justify-between">
+                      <div>
+                        <p className="text-sm text-stone-500 mb-1">Сегодня</p>
+                        <p className="text-lg sm:text-xl font-semibold text-stone-900 capitalize">{fmtFull(today)}</p>
+                      </div>
+                      <div className="text-right">
+                        <p className={`text-3xl sm:text-4xl font-bold ${myTodayHours >= 8 ? 'text-emerald-600' : 'text-amber-500'}`}>
+                          {myTodayHours}
+                        </p>
+                        <p className="text-sm text-stone-500">часов</p>
+                      </div>
+                    </div>
+                    
+                    {myTodayHours < 8 && (
+                      <div className="mt-4 flex items-center gap-2 text-sm text-amber-600">
+                        <span>⚠️</span>
+                        <span>Осталось записать {8 - myTodayHours} ч</span>
+                      </div>
+                    )}
+                  </div>
+                  
+                  {myTodayTasks.length > 0 && (
+                    <div className="border-t border-stone-100 bg-stone-50 p-4">
+                      <p className="text-xs font-medium text-stone-500 uppercase tracking-wider mb-3">Записано сегодня</p>
+                      <div className="space-y-2">
+                        {myTodayTasks.map(t => {
+                          const sec = sections.find(s => s.id === t.sectionId);
+                          return (
+                            <div key={t.id} className="flex items-center gap-3 bg-white rounded-lg p-3 shadow-sm">
+                              <div className="w-10 h-10 bg-blue-100 text-blue-600 rounded-lg flex items-center justify-center font-semibold text-sm shrink-0">
+                                {t.hours}ч
+                              </div>
+                              <div className="flex-1 min-w-0">
+                                <p className="text-sm font-medium text-stone-900 truncate">{t.desc}</p>
+                                <p className="text-xs text-stone-500">{sec?.name}</p>
+                              </div>
+                              <button onClick={() => { setModal('editTask'); setForm(t); }} className="p-1.5 text-stone-400 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-colors shrink-0">
+                                ✎
+                              </button>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                <div>
+                  <h2 className="text-lg font-semibold text-stone-900 mb-4">Мои разделы</h2>
+                  <div className="space-y-3">
+                    {mySections.map(section => {
+                      const proj = projects.find(p => p.id === section.projectId);
+                      const actual = getSectionHours(section.id);
+                      const progress = getSectionProgress(section);
+                      const sectionTasks = tasks.filter(t => t.sectionId === section.id);
+                      const isOverdue = section.deadline < today && progress < 100;
+                      const isDone = progress >= 100;
+
+                      return (
+                        <div 
+                          key={section.id} 
+                          className={`bg-white rounded-2xl border shadow-sm overflow-hidden transition-all hover:shadow-md cursor-pointer ${
+                            isOverdue ? 'border-red-200' : isDone ? 'border-emerald-200' : 'border-stone-200'
+                          }`}
+                          onClick={() => { setModal('addTask'); setForm({ sectionId: section.id, hours: '8', date: today }); }}
+                        >
+                          <div className="p-4 sm:p-5">
+                            <div className="flex items-start justify-between mb-3">
+                              <div className="flex-1 min-w-0 pr-4">
+                                <div className="flex items-center gap-2 mb-1 flex-wrap">
+                                  <h3 className="font-semibold text-stone-900">{section.name}</h3>
+                                  {isOverdue && <span className="px-2 py-0.5 bg-red-100 text-red-600 text-[10px] font-medium rounded-full">просрочен</span>}
+                                  {isDone && <span className="px-2 py-0.5 bg-emerald-100 text-emerald-600 text-[10px] font-medium rounded-full">готово</span>}
+                                </div>
+                                <p className="text-sm text-stone-500">{proj?.code} · {proj?.name}</p>
+                              </div>
+                              <div className="text-right shrink-0">
+                                <p className={`text-2xl font-bold ${isDone ? 'text-emerald-600' : 'text-stone-900'}`}>{progress}%</p>
+                                <p className="text-xs text-stone-500">{actual} / {section.plannedHours} ч</p>
+                              </div>
+                            </div>
+                            
+                            <div className="flex items-center gap-3">
+                              <div className="flex-1 h-2 bg-stone-100 rounded-full overflow-hidden">
+                                <div 
+                                  className={`h-full rounded-full transition-all ${isDone ? 'bg-emerald-500' : 'bg-blue-500'}`} 
+                                  style={{ width: `${progress}%` }}
+                                ></div>
+                              </div>
+                              <span className="text-xs text-stone-500 whitespace-nowrap">до {fmt(section.deadline)}</span>
+                            </div>
+                          </div>
+                          
+                          {sectionTasks.length > 0 && (
+                            <div className="px-4 sm:px-5 py-3 bg-stone-50 border-t border-stone-100">
+                              <div className="flex items-center gap-2 text-xs text-stone-500">
+                                <span>📋 {sectionTasks.length} записей</span>
+                              </div>
+                            </div>
+                          )}
+                          
+                          <div className="px-4 sm:px-5 py-3 bg-blue-50 border-t border-blue-100 flex items-center justify-center gap-2 text-sm font-medium text-blue-600">
+                            + Записать работу
+                          </div>
+                        </div>
+                      );
+                    })}
+
+                    {mySections.length === 0 && (
+                      <div className="bg-white rounded-2xl border border-stone-200 p-12 text-center">
+                        <p className="text-stone-500">Нет назначенных разделов</p>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* GANTT */}
+            {view === 'gantt' && (
+              <div className="space-y-6">
+                <div className="flex flex-col sm:flex-row sm:items-center gap-3 sm:gap-4">
+                  <select 
+                    value={selectedProject || ''} 
+                    onChange={(e) => setSelectedProject(e.target.value ? +e.target.value : null)}
+                    className="h-10 px-4 bg-white border border-stone-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                  >
+                    <option value="">Все проекты</option>
+                    {projects.map(p => <option key={p.id} value={p.id}>{p.code} — {p.name}</option>)}
+                  </select>
+                  
+                  <div className="flex gap-2 sm:ml-auto">
+                    {isMod && (
+                      <button 
+                        onClick={() => { setModal('addProject'); setForm({}); }}
+                        className="h-10 px-4 text-sm text-blue-600 hover:bg-blue-50 rounded-lg transition-colors"
+                      >
+                        + Проект
+                      </button>
+                    )}
+                    
+                    <div className="flex gap-1 bg-white border border-stone-200 rounded-lg p-1">
+                      <button 
+                        onClick={() => setExpanded(new Set(filteredSections.map(s => s.id)))}
+                        className="px-3 py-1.5 text-xs text-stone-600 hover:bg-stone-100 rounded"
+                      >
+                        Развернуть
+                      </button>
+                      <button 
+                        onClick={() => setExpanded(new Set())}
+                        className="px-3 py-1.5 text-xs text-stone-600 hover:bg-stone-100 rounded"
+                      >
+                        Свернуть
+                      </button>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 sm:gap-4">
+                  {[
+                    { label: 'Разделов', value: stats.sections },
+                    { label: 'План', value: `${stats.planned} ч` },
+                    { label: 'Факт', value: `${stats.actual} ч`, accent: true },
+                    { label: 'Прогресс', value: `${stats.progress}%` },
+                  ].map((s, i) => (
+                    <div key={i} className="bg-white rounded-xl border border-stone-200 p-3 sm:p-4 shadow-sm">
+                      <p className="text-xs text-stone-500 mb-1">{s.label}</p>
+                      <p className={`text-xl sm:text-2xl font-bold ${s.accent ? 'text-blue-600' : 'text-stone-900'}`}>{s.value}</p>
+                    </div>
+                  ))}
+                </div>
+
+                <div className="bg-white rounded-2xl border border-stone-200 shadow-sm overflow-hidden">
+                  <div className="overflow-x-auto">
+                    <div className="flex border-b border-stone-200 bg-stone-50 min-w-max">
+                      <div className="w-64 sm:w-80 shrink-0 px-4 py-3 font-medium text-xs text-stone-500 uppercase tracking-wider border-r border-stone-200">
+                        Раздел
+                      </div>
+                      <div className="flex">
+                        {dateRange.map((d, i) => (
+                          <div 
+                            key={i} 
+                            className={`w-11 shrink-0 py-2 text-center text-[11px] border-l border-stone-100 ${
+                              isWknd(d) ? 'bg-stone-100 text-stone-400' : 'text-stone-500'
+                            } ${isToday(d) ? 'bg-blue-100 text-blue-600 font-semibold' : ''}`}
+                          >
+                            <div className="font-medium">{new Date(d).getDate()}</div>
+                            <div className="uppercase text-[9px]">{new Date(d).toLocaleDateString('ru-RU', { weekday: 'short' }).slice(0, 2)}</div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+
+                    {grouped.map(({ project, sections: projSections }) => (
+                      <div key={project.id}>
+                        <div className="flex border-b border-stone-200 bg-stone-100/50 min-w-max">
+                          <div className="w-64 sm:w-80 shrink-0 px-4 py-3 border-r border-stone-200">
+                            <p className="font-semibold text-stone-900">{project.code}</p>
+                            <p className="text-xs text-stone-500">{project.name}</p>
+                          </div>
+                          <div className="flex">
+                            {dateRange.map((d, i) => (
+                              <div key={i} className={`w-11 shrink-0 border-l border-stone-100 ${isWknd(d) ? 'bg-stone-100/50' : ''}`}></div>
+                            ))}
+                          </div>
+                        </div>
+
+                        {projSections.map(section => {
+                          const emp = employees.find(e => e.id === section.employeeId);
+                          const actual = getSectionHours(section.id);
+                          const progress = getSectionProgress(section);
+                          const sectionTasks = tasks.filter(t => t.sectionId === section.id);
+                          const isExp = expanded.has(section.id);
+                          const deadlineIdx = dateRange.findIndex(d => d.toISOString().split('T')[0] === section.deadline);
+                          const firstTaskIdx = sectionTasks.length > 0 ? dateRange.findIndex(d => d.toISOString().split('T')[0] === sectionTasks[0].date) : -1;
+                          const todayIdx = dateRange.findIndex(d => isToday(d));
+
+                          return (
+                            <div key={section.id}>
+                              <div className="flex border-b border-stone-100 hover:bg-blue-50/30 transition-colors group min-w-max">
+                                <div className="w-64 sm:w-80 shrink-0 px-4 py-3 border-r border-stone-200 flex items-center gap-2 sm:gap-3">
+                                  <button
+                                    onClick={() => setExpanded(prev => {
+                                      const n = new Set(prev);
+                                      n.has(section.id) ? n.delete(section.id) : n.add(section.id);
+                                      return n;
+                                    })}
+                                    className={`w-6 h-6 flex items-center justify-center rounded text-stone-400 hover:text-stone-600 hover:bg-stone-100 transition-colors shrink-0 ${
+                                      sectionTasks.length === 0 ? 'opacity-0' : ''
+                                    }`}
+                                  >
+                                    {isExp ? '▼' : '▶'}
+                                  </button>
+                                  <div className="flex-1 min-w-0">
+                                    <p className="font-medium text-stone-900 truncate text-sm">{section.name}</p>
+                                    <p className="text-xs text-stone-500 truncate">{emp?.name} · {actual}/{section.plannedHours} ч</p>
+                                  </div>
+                                  {isMod && (
+                                    <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity shrink-0">
+                                      <button 
+                                        onClick={(e) => { e.stopPropagation(); setModal('editSection'); setForm({ ...section, projectId: section.projectId.toString(), employeeId: section.employeeId.toString(), plannedHours: section.plannedHours.toString() }); }}
+                                        className="p-1.5 text-stone-400 hover:text-blue-600 hover:bg-blue-50 rounded text-xs"
+                                      >
+                                        ✎
+                                      </button>
+                                      <button 
+                                        onClick={(e) => { e.stopPropagation(); deleteSection(section.id); }}
+                                        className="p-1.5 text-stone-400 hover:text-red-600 hover:bg-red-50 rounded text-xs"
+                                      >
+                                        ✕
+                                      </button>
+                                    </div>
+                                  )}
+                                </div>
+                                <div className="flex relative" style={{ minHeight: '52px' }}>
+                                  {dateRange.map((d, i) => (
+                                    <div key={i} className={`w-11 shrink-0 border-l border-stone-50 ${isWknd(d) ? 'bg-stone-50' : ''}`}></div>
+                                  ))}
+                                  {todayIdx >= 0 && (
+                                    <div className="absolute top-0 bottom-0 w-0.5 bg-blue-500 z-10" style={{ left: `${todayIdx * 44 + 22}px` }}></div>
+                                  )}
+                                  {deadlineIdx >= 0 && firstTaskIdx >= 0 && (
+                                    <div
+                                      className={`absolute top-3 h-7 rounded-lg shadow-sm flex items-center px-2 text-xs font-medium text-white ${
+                                        progress >= 100 ? 'bg-emerald-500' : 'bg-blue-500'
+                                      }`}
+                                      style={{ 
+                                        left: `${firstTaskIdx * 44 + 4}px`, 
+                                        width: `${Math.max((deadlineIdx - firstTaskIdx + 1) * 44 - 8, 36)}px` 
+                                      }}
+                                    >
+                                      <div className="absolute inset-0 bg-white/20 rounded-lg" style={{ width: `${100 - progress}%`, right: 0, left: 'auto' }}></div>
+                                      <span className="relative">{progress}%</span>
+                                    </div>
+                                  )}
+                                </div>
+                              </div>
+
+                              {isExp && sectionTasks.map(task => {
+                                const taskIdx = dateRange.findIndex(d => d.toISOString().split('T')[0] === task.date);
+                                return (
+                                  <div key={task.id} className="flex border-b border-stone-50 bg-stone-50/50 hover:bg-blue-50/30 transition-colors group min-w-max">
+                                    <div className="w-64 sm:w-80 shrink-0 px-4 py-2 pl-12 sm:pl-14 border-r border-stone-200">
+                                      <p className="text-sm text-stone-700 truncate">{task.desc}</p>
+                                      <p className="text-[11px] text-stone-400">{fmt(task.date)} · {task.hours} ч</p>
+                                    </div>
+                                    <div className="flex relative" style={{ minHeight: '44px' }}>
+                                      {dateRange.map((d, i) => (
+                                        <div key={i} className={`w-11 shrink-0 border-l border-stone-50/50 ${isWknd(d) ? 'bg-stone-100/30' : ''}`}></div>
+                                      ))}
+                                      {taskIdx >= 0 && (
+                                        <div 
+                                          className="absolute top-2 h-6 w-10 bg-blue-400 rounded-md flex items-center justify-center text-[10px] font-medium text-white shadow-sm"
+                                          style={{ left: `${taskIdx * 44 + 2}px` }}
+                                        >
+                                          {task.hours}ч
+                                        </div>
+                                      )}
+                                    </div>
+                                    <div className="flex items-center gap-1 pr-2 opacity-0 group-hover:opacity-100 transition-opacity shrink-0">
+                                      <button onClick={() => { setModal('editTask'); setForm(task); }} className="p-1 text-stone-400 hover:text-blue-600 text-xs">✎</button>
+                                      <button onClick={() => deleteTask(task.id)} className="p-1 text-stone-400 hover:text-red-600 text-xs">✕</button>
+                                    </div>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    ))}
+
+                    {filteredSections.length === 0 && (
+                      <div className="p-12 text-center text-stone-400">Нет данных</div>
+                    )}
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* DAILY */}
+            {view === 'daily' && (
+              <div className="space-y-6">
+                <div className="flex flex-col sm:flex-row sm:items-center gap-3 sm:gap-4">
+                  <input 
+                    type="date" 
+                    value={selectedDate} 
+                    onChange={(e) => setSelectedDate(e.target.value)}
+                    className="h-10 px-4 bg-white border border-stone-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  />
+                  <div className="sm:flex-1"></div>
+                  <div className="text-sm text-stone-600">
+                    Всего: <span className="font-semibold text-blue-600">{tasksByDate.reduce((s, t) => s + t.hours, 0)} ч</span>
+                  </div>
+                </div>
+
+                <div className="bg-white rounded-2xl border border-stone-200 shadow-sm overflow-hidden">
+                  <div className="px-4 sm:px-5 py-4 border-b border-stone-200 bg-stone-50">
+                    <p className="font-semibold text-stone-900 capitalize">{fmtFull(selectedDate)}</p>
+                  </div>
+                  
+                  {tasksByDate.length === 0 ? (
+                    <div className="p-12 text-center text-stone-400">Нет записей</div>
+                  ) : (
+                    <div className="divide-y divide-stone-100">
+                      {employees.filter(e => !e.isMod).map(emp => {
+                        const empTasks = tasksByDate.filter(t => sections.find(s => s.id === t.sectionId)?.employeeId === emp.id);
+                        if (empTasks.length === 0) return null;
+                        const total = empTasks.reduce((s, t) => s + t.hours, 0);
+
+                        return (
+                          <div key={emp.id} className="p-4 sm:p-5">
+                            <div className="flex items-center gap-3 sm:gap-4 mb-4">
+                              <div className="w-10 h-10 bg-stone-200 rounded-full flex items-center justify-center font-medium text-stone-600 shrink-0">
+                                {emp.name.split(' ').map(n => n[0]).join('')}
+                              </div>
+                              <div className="flex-1 min-w-0">
+                                <p className="font-medium text-stone-900 truncate">{emp.name}</p>
+                                <p className="text-xs text-stone-500">{emp.position}</p>
+                              </div>
+                              <p className={`text-xl font-bold shrink-0 ${total >= 8 ? 'text-emerald-600' : 'text-amber-500'}`}>{total} ч</p>
+                            </div>
+                            
+                            <div className="space-y-2 sm:pl-14">
+                              {empTasks.map(t => {
+                                const sec = sections.find(s => s.id === t.sectionId);
+                                const proj = projects.find(p => p.id === sec?.projectId);
+                                return (
+                                  <div key={t.id} className="flex items-center gap-3 p-3 bg-stone-50 rounded-xl group">
+                                    <div className="flex-1 min-w-0">
+                                      <p className="text-sm font-medium text-stone-900 truncate">{t.desc}</p>
+                                      <p className="text-xs text-stone-500 truncate">{proj?.code} · {sec?.name}</p>
+                                    </div>
+                                    <span className="text-sm font-semibold text-stone-600 shrink-0">{t.hours} ч</span>
+                                    <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity shrink-0">
+                                      <button onClick={() => { setModal('editTask'); setForm(t); }} className="p-1.5 text-stone-400 hover:text-blue-600 rounded">✎</button>
+                                      <button onClick={() => deleteTask(t.id)} className="p-1.5 text-stone-400 hover:text-red-600 rounded">✕</button>
+                                    </div>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 sm:gap-3">
+                  {employees.filter(e => !e.isMod).map(emp => {
+                    const h = tasksByDate.filter(t => sections.find(s => s.id === t.sectionId)?.employeeId === emp.id).reduce((s, t) => s + t.hours, 0);
+                    return (
+                      <div 
+                        key={emp.id} 
+                        className={`p-3 sm:p-4 rounded-xl text-center ${
+                          h >= 8 ? 'bg-emerald-50 border border-emerald-200' : 
+                          h > 0 ? 'bg-amber-50 border border-amber-200' : 
+                          'bg-stone-100 border border-stone-200'
+                        }`}
+                      >
+                        <p className="text-xs text-stone-600 truncate mb-1">{emp.name.split(' ')[0]}</p>
+                        <p className={`text-xl sm:text-2xl font-bold ${h >= 8 ? 'text-emerald-600' : h > 0 ? 'text-amber-600' : 'text-stone-400'}`}>{h} ч</p>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
+            {/* TEAM */}
+            {view === 'team' && (
+              <div className="grid lg:grid-cols-2 gap-6">
+                <div className="bg-white rounded-2xl border border-stone-200 shadow-sm overflow-hidden">
+                  <div className="px-4 sm:px-5 py-4 border-b border-stone-200 flex items-center justify-between">
+                    <h3 className="font-semibold text-stone-900">Сотрудники</h3>
+                    {isMod && (
+                      <button onClick={() => { setModal('addEmployee'); setForm({}); }} className="text-sm text-blue-600 hover:text-blue-700">
+                        + Добавить
+                      </button>
+                    )}
+                  </div>
+                  <div className="divide-y divide-stone-100">
+                    {employees.map(emp => {
+                      const empSections = sections.filter(s => s.employeeId === emp.id);
+                      const actual = empSections.reduce((s, sec) => s + getSectionHours(sec.id), 0);
+                      const planned = empSections.reduce((s, sec) => s + sec.plannedHours, 0);
+                      
+                      return (
+                        <div key={emp.id} className="px-4 sm:px-5 py-4 flex items-center gap-3 sm:gap-4">
+                          <div className={`w-10 h-10 rounded-full flex items-center justify-center font-medium shrink-0 ${
+                            emp.isMod ? 'bg-amber-100 text-amber-700' : 'bg-stone-200 text-stone-600'
+                          }`}>
+                            {emp.name.split(' ').map(n => n[0]).join('')}
+                          </div>
+                          <div className="flex-1 min-w-0">
+                            <p className="font-medium text-stone-900 truncate">{emp.name}</p>
+                            <p className="text-xs text-stone-500">{emp.position}</p>
+                          </div>
+                          {emp.isMod ? (
+                            <span className="px-2 py-1 bg-amber-100 text-amber-700 text-[10px] font-medium rounded-full shrink-0">рук.</span>
+                          ) : (
+                            <span className="text-sm text-stone-500 shrink-0">{actual}/{planned} ч</span>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                <div className="bg-white rounded-2xl border border-stone-200 shadow-sm overflow-hidden">
+                  <div className="px-4 sm:px-5 py-4 border-b border-stone-200 flex items-center justify-between">
+                    <h3 className="font-semibold text-stone-900">Проекты</h3>
+                    {isMod && (
+                      <button onClick={() => { setModal('addProject'); setForm({}); }} className="text-sm text-blue-600 hover:text-blue-700">
+                        + Добавить
+                      </button>
+                    )}
+                  </div>
+                  <div className="divide-y divide-stone-100">
+                    {projects.map(proj => {
+                      const projSections = sections.filter(s => s.projectId === proj.id);
+                      const actual = projSections.reduce((s, sec) => s + getSectionHours(sec.id), 0);
+                      const planned = projSections.reduce((s, sec) => s + sec.plannedHours, 0);
+                      
+                      return (
+                        <div key={proj.id} className="px-4 sm:px-5 py-4 flex items-center gap-3 sm:gap-4">
+                          <div className="w-10 h-10 bg-blue-100 text-blue-600 rounded-lg flex items-center justify-center font-semibold text-xs shrink-0">
+                            {proj.code.slice(-2)}
+                          </div>
+                          <div className="flex-1 min-w-0">
+                            <p className="font-medium text-stone-900 truncate">{proj.name}</p>
+                            <p className="text-xs text-stone-500">Шифр: {proj.code}</p>
+                          </div>
+                          <div className="text-right shrink-0">
+                            <p className="text-sm font-medium text-stone-900">{projSections.length} разд.</p>
+                            <p className="text-xs text-stone-500">{actual}/{planned} ч</p>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                <div className="lg:col-span-2">
+                  <button onClick={resetData} className="text-sm text-stone-400 hover:text-red-600 transition-colors">
+                    Сбросить данные к начальным
+                  </button>
+                </div>
+              </div>
+            )}
+          </main>
+
+          {/* MODALS */}
+          {modal && (
+            <div className="fixed inset-0 bg-black/40 backdrop-blur-sm flex items-center justify-center z-50 p-4" onClick={closeModal}>
+              <div className="bg-white rounded-2xl w-full max-w-md shadow-2xl max-h-[90vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
+                
+                {(modal === 'addSection' || modal === 'editSection') && (
+                  <>
+                    <div className="px-5 sm:px-6 py-5 border-b border-stone-200">
+                      <h2 className="text-lg font-semibold text-stone-900">
+                        {modal === 'editSection' ? 'Редактировать раздел' : 'Назначить раздел'}
+                      </h2>
+                    </div>
+                    <div className="px-5 sm:px-6 py-5 space-y-4">
+                      <div>
+                        <label className="block text-sm font-medium text-stone-700 mb-1.5">Проект</label>
+                        <select value={form.projectId || ''} onChange={e => setForm({ ...form, projectId: e.target.value })} className="w-full h-10 px-3 border border-stone-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+                          <option value="">Выберите проект</option>
+                          {projects.map(p => <option key={p.id} value={p.id}>{p.code} — {p.name}</option>)}
+                        </select>
+                      </div>
+                      <div>
+                        <label className="block text-sm font-medium text-stone-700 mb-1.5">Название раздела</label>
+                        <input type="text" value={form.name || ''} onChange={e => setForm({ ...form, name: e.target.value })} placeholder="Например: Фундаменты" className="w-full h-10 px-3 border border-stone-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
+                      </div>
+                      <div>
+                        <label className="block text-sm font-medium text-stone-700 mb-1.5">Исполнитель</label>
+                        <select value={form.employeeId || ''} onChange={e => setForm({ ...form, employeeId: e.target.value })} className="w-full h-10 px-3 border border-stone-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+                          <option value="">Выберите исполнителя</option>
+                          {employees.filter(e => !e.isMod).map(e => <option key={e.id} value={e.id}>{e.name}</option>)}
+                        </select>
+                      </div>
+                      <div className="grid grid-cols-2 gap-4">
+                        <div>
+                          <label className="block text-sm font-medium text-stone-700 mb-1.5">Срок</label>
+                          <input type="date" value={form.deadline || ''} onChange={e => setForm({ ...form, deadline: e.target.value })} className="w-full h-10 px-3 border border-stone-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
+                        </div>
+                        <div>
+                          <label className="block text-sm font-medium text-stone-700 mb-1.5">План, часов</label>
+                          <input type="number" value={form.plannedHours || ''} onChange={e => setForm({ ...form, plannedHours: e.target.value })} placeholder="40" className="w-full h-10 px-3 border border-stone-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
+                        </div>
+                      </div>
+                    </div>
+                    <div className="px-5 sm:px-6 py-4 border-t border-stone-200 flex justify-end gap-3">
+                      <button onClick={closeModal} className="h-10 px-4 text-sm font-medium text-stone-600 hover:bg-stone-100 rounded-lg">Отмена</button>
+                      <button onClick={saveSection} className="h-10 px-5 text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 rounded-lg">{modal === 'editSection' ? 'Сохранить' : 'Назначить'}</button>
+                    </div>
+                  </>
+                )}
+
+                {(modal === 'addTask' || modal === 'editTask') && (
+                  <>
+                    <div className="px-5 sm:px-6 py-5 border-b border-stone-200">
+                      <h2 className="text-lg font-semibold text-stone-900">{modal === 'editTask' ? 'Редактировать запись' : 'Записать работу'}</h2>
+                      {modal === 'addTask' && form.sectionId && (
+                        <p className="text-sm text-stone-500 mt-1">{sections.find(s => s.id === form.sectionId)?.name}</p>
+                      )}
+                    </div>
+                    <div className="px-5 sm:px-6 py-5 space-y-4">
+                      <div>
+                        <label className="block text-sm font-medium text-stone-700 mb-1.5">Дата</label>
+                        <input type="date" value={form.date || today} onChange={e => setForm({ ...form, date: e.target.value })} className="w-full h-10 px-3 border border-stone-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
+                      </div>
+                      <div>
+                        <label className="block text-sm font-medium text-stone-700 mb-1.5">Часы</label>
+                        <div className="flex gap-2 mb-2">
+                          {[1, 2, 4, 6, 8].map(h => (
+                            <button key={h} onClick={() => setForm({ ...form, hours: h.toString() })} className={`flex-1 h-10 rounded-lg text-sm font-medium transition-colors ${form.hours === h.toString() ? 'bg-blue-600 text-white' : 'bg-stone-100 text-stone-700 hover:bg-stone-200'}`}>{h}</button>
+                          ))}
+                        </div>
+                        <input type="number" step="0.5" value={form.hours || ''} onChange={e => setForm({ ...form, hours: e.target.value })} placeholder="Или введите вручную" className="w-full h-10 px-3 border border-stone-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
+                      </div>
+                      <div>
+                        <label className="block text-sm font-medium text-stone-700 mb-1.5">Что сделано</label>
+                        <textarea value={form.desc || ''} onChange={e => setForm({ ...form, desc: e.target.value })} placeholder="Опишите выполненную работу..." rows={3} className="w-full px-3 py-2 border border-stone-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none" />
+                      </div>
+                    </div>
+                    <div className="px-5 sm:px-6 py-4 border-t border-stone-200 flex justify-end gap-3">
+                      <button onClick={closeModal} className="h-10 px-4 text-sm font-medium text-stone-600 hover:bg-stone-100 rounded-lg">Отмена</button>
+                      <button onClick={saveTask} disabled={!form.desc} className="h-10 px-5 text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 disabled:bg-stone-300 rounded-lg">Записать</button>
+                    </div>
+                  </>
+                )}
+
+                {modal === 'addProject' && (
+                  <>
+                    <div className="px-5 sm:px-6 py-5 border-b border-stone-200">
+                      <h2 className="text-lg font-semibold text-stone-900">Добавить проект</h2>
+                    </div>
+                    <div className="px-5 sm:px-6 py-5 space-y-4">
+                      <div>
+                        <label className="block text-sm font-medium text-stone-700 mb-1.5">Шифр</label>
+                        <input type="text" value={form.code || ''} onChange={e => setForm({ ...form, code: e.target.value })} placeholder="2025-01" className="w-full h-10 px-3 border border-stone-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
+                      </div>
+                      <div>
+                        <label className="block text-sm font-medium text-stone-700 mb-1.5">Название</label>
+                        <input type="text" value={form.name || ''} onChange={e => setForm({ ...form, name: e.target.value })} placeholder="ЖК Название" className="w-full h-10 px-3 border border-stone-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
+                      </div>
+                    </div>
+                    <div className="px-5 sm:px-6 py-4 border-t border-stone-200 flex justify-end gap-3">
+                      <button onClick={closeModal} className="h-10 px-4 text-sm font-medium text-stone-600 hover:bg-stone-100 rounded-lg">Отмена</button>
+                      <button onClick={saveProject} className="h-10 px-5 text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 rounded-lg">Добавить</button>
+                    </div>
+                  </>
+                )}
+
+                {modal === 'addEmployee' && (
+                  <>
+                    <div className="px-5 sm:px-6 py-5 border-b border-stone-200">
+                      <h2 className="text-lg font-semibold text-stone-900">Добавить сотрудника</h2>
+                    </div>
+                    <div className="px-5 sm:px-6 py-5 space-y-4">
+                      <div>
+                        <label className="block text-sm font-medium text-stone-700 mb-1.5">ФИО</label>
+                        <input type="text" value={form.name || ''} onChange={e => setForm({ ...form, name: e.target.value })} placeholder="Иванов И.И." className="w-full h-10 px-3 border border-stone-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
+                      </div>
+                      <div>
+                        <label className="block text-sm font-medium text-stone-700 mb-1.5">Должность</label>
+                        <input type="text" value={form.position || ''} onChange={e => setForm({ ...form, position: e.target.value })} placeholder="Инженер" className="w-full h-10 px-3 border border-stone-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
+                      </div>
+                      <label className="flex items-center gap-2 cursor-pointer">
+                        <input type="checkbox" checked={form.isMod || false} onChange={e => setForm({ ...form, isMod: e.target.checked })} className="w-4 h-4 rounded border-stone-300" />
+                        <span className="text-sm text-stone-700">Руководитель</span>
+                      </label>
+                    </div>
+                    <div className="px-5 sm:px-6 py-4 border-t border-stone-200 flex justify-end gap-3">
+                      <button onClick={closeModal} className="h-10 px-4 text-sm font-medium text-stone-600 hover:bg-stone-100 rounded-lg">Отмена</button>
+                      <button onClick={saveEmployee} className="h-10 px-5 text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 rounded-lg">Добавить</button>
+                    </div>
+                  </>
+                )}
+              </div>
+            </div>
+          )}
+        </div>
+      );
+    };
+
+    ReactDOM.createRoot(document.getElementById('root')).render(<TimeTracker />);
+  </script>
+</body>
+</html>
